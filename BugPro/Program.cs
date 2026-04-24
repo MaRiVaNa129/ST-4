@@ -2,177 +2,200 @@ using Stateless;
 
 namespace BugPro;
 
-public enum BugState
+public sealed class Bug
 {
-    NewDefect,          
-    DefectAnalysis,     
-    Correction,         
-    Closure,            
-    Reopened,           
-    Resolved,           
-    Closed              
-}
+    public enum State
+    {
+        New,
+        Triaged,
+        InProgress,
+        WaitingForInfo,
+        Deferred,
+        Resolved,
+        Closed,
+        Reopened,
+        Rejected,
+        Duplicate,
+        CannotReproduce
+    }
 
-public enum BugTrigger
-{
-    StartAnalysis,          
-    
-    ConfirmAsDefect,        
-    NotDefect,              
-    DontFix,                
-    Duplicate,              
-    NotReproducible,        
-    
-    ConfirmFix,             
-    RejectFix,              
-    
-    Close,                  
-    Reopen,                 
-    
-    AssignToTester,         
-    AssignToProductTeam,    
-    AssignToDeveloper       
-}
+    public enum Trigger
+    {
+        Triage,
+        StartProgress,
+        RequestInfo,
+        ProvideInfo,
+        Defer,
+        Resume,
+        Resolve,
+        VerifyFix,
+        Reopen,
+        Close,
+        MarkNotABug,
+        MarkDuplicate,
+        MarkCannotReproduce,
+        ReturnToTriaged
+    }
 
-public class Bug
-{
-    private readonly StateMachine<BugState, BugTrigger> _machine;
-    private string _assignedTo = string.Empty;
-    
-    private readonly StateMachine<BugState, BugTrigger>.TriggerWithParameters<string> _assignToTesterParam;
-    private readonly StateMachine<BugState, BugTrigger>.TriggerWithParameters<string> _assignToProductTeamParam;
-    private readonly StateMachine<BugState, BugTrigger>.TriggerWithParameters<string> _assignToDeveloperParam;
-
-    public BugState State => _machine.State;
-    public string AssignedTo => _assignedTo;
+    private readonly StateMachine<State, Trigger> _workflow;
+    private readonly StateMachine<State, Trigger>.TriggerWithParameters<bool> _verifyFixTrigger;
 
     public Bug()
     {
-        _machine = new StateMachine<BugState, BugTrigger>(BugState.NewDefect);
-        
-        _assignToTesterParam = _machine.SetTriggerParameters<string>(BugTrigger.AssignToTester);
-        _assignToProductTeamParam = _machine.SetTriggerParameters<string>(BugTrigger.AssignToProductTeam);
-        _assignToDeveloperParam = _machine.SetTriggerParameters<string>(BugTrigger.AssignToDeveloper);
+        var history = new List<string>();
+        History = history;
+        _workflow = new StateMachine<State, Trigger>(State.New);
+        _verifyFixTrigger = _workflow.SetTriggerParameters<bool>(Trigger.VerifyFix);
 
-        ConfigureTransitions();
+        ConfigureWorkflow(history);
     }
 
-    private void ConfigureTransitions()
+    public IReadOnlyList<string> History { get; }
+
+    public State CurrentState => _workflow.State;
+
+    public bool CanFire(Trigger trigger) => _workflow.CanFire(trigger);
+
+    public bool IsFinalState =>
+        CurrentState is State.Closed or State.Rejected or State.Duplicate;
+
+    public void Triage() => Fire(Trigger.Triage);
+
+    public void StartProgress() => Fire(Trigger.StartProgress);
+
+    public void RequestInfo() => Fire(Trigger.RequestInfo);
+
+    public void ProvideInfo() => Fire(Trigger.ProvideInfo);
+
+    public void Defer() => Fire(Trigger.Defer);
+
+    public void Resume() => Fire(Trigger.Resume);
+
+    public void Resolve() => Fire(Trigger.Resolve);
+
+    public void VerifyFix(bool isFixed) => _workflow.Fire(_verifyFixTrigger, isFixed);
+
+    public void Reopen() => Fire(Trigger.Reopen);
+
+    public void Close() => Fire(Trigger.Close);
+
+    public void MarkNotABug() => Fire(Trigger.MarkNotABug);
+
+    public void MarkDuplicate() => Fire(Trigger.MarkDuplicate);
+
+    public void MarkCannotReproduce() => Fire(Trigger.MarkCannotReproduce);
+
+    public void ReturnToTriaged() => Fire(Trigger.ReturnToTriaged);
+
+    public override string ToString() =>
+        $"Bug state: {CurrentState}; final: {IsFinalState}; history size: {History.Count}";
+
+    private void ConfigureWorkflow(ICollection<string> history)
     {
-        _machine.Configure(BugState.NewDefect)
-            .Permit(BugTrigger.StartAnalysis, BugState.DefectAnalysis)
-            .Permit(BugTrigger.Close, BugState.Closed)
-            .OnEntry(() => Console.WriteLine("[НОВЫЙ ДЕФЕКТ] Баг зарегистрирован"));
+        _workflow.OnTransitioned(transition => history.Add(FormatTransition(transition)));
 
-        _machine.Configure(BugState.DefectAnalysis)
-            .Permit(BugTrigger.ConfirmAsDefect, BugState.Correction)
-            .Permit(BugTrigger.NotDefect, BugState.Closed)
-            .Permit(BugTrigger.DontFix, BugState.Closed)
-            .Permit(BugTrigger.Duplicate, BugState.Closed)
-            .Permit(BugTrigger.NotReproducible, BugState.Closed)
-            .OnEntry(() => Console.WriteLine("[РАЗБОР ДЕФЕКТОВ] Анализ бага"));
-
-        _machine.Configure(BugState.Correction)
-            .Permit(BugTrigger.ConfirmFix, BugState.Resolved)
-            .Permit(BugTrigger.RejectFix, BugState.DefectAnalysis)
-            .Permit(BugTrigger.AssignToDeveloper, BugState.Correction)
-            .OnEntry(() => Console.WriteLine("[ИСПРАВЛЕНИЕ] Разработка исправления"));
-
-        _machine.Configure(BugState.Resolved)
-            .Permit(BugTrigger.Close, BugState.Closure)
-            .Permit(BugTrigger.Reopen, BugState.Reopened)
-            .OnEntry(() => Console.WriteLine("[ПРОБЛЕМА РЕШЕНА?] Ожидание подтверждения"));
-
-        _machine.Configure(BugState.Closure)
-            .Permit(BugTrigger.Close, BugState.Closed)
-            .OnEntry(() => Console.WriteLine("[ЗАКРЫТИЕ] Подготовка к закрытию"));
-
-        _machine.Configure(BugState.Reopened)
-            .Permit(BugTrigger.StartAnalysis, BugState.DefectAnalysis)
-            .OnEntry(() => Console.WriteLine("[ПЕРЕОТКРЫТИЕ] Баг требует доработки"));
-
-        _machine.Configure(BugState.Closed)
-            .OnEntry(() => Console.WriteLine("[ЗАКРЫТ] Баг закрыт"));
+        ConfigureNewState();
+        ConfigureTriagedState();
+        ConfigureInProgressState();
+        ConfigureWaitingForInfoState();
+        ConfigureDeferredState();
+        ConfigureResolvedState();
+        ConfigureReviewStates();
+        ConfigureReopenedState();
     }
 
-    // Методы для внешнего вызова
-    
-    public void StartAnalysis() => _machine.Fire(BugTrigger.StartAnalysis);
-    public void ConfirmAsDefect() => _machine.Fire(BugTrigger.ConfirmAsDefect);
-    public void MarkNotDefect() => _machine.Fire(BugTrigger.NotDefect);
-    public void MarkDontFix() => _machine.Fire(BugTrigger.DontFix);
-    public void MarkDuplicate() => _machine.Fire(BugTrigger.Duplicate);
-    public void MarkNotReproducible() => _machine.Fire(BugTrigger.NotReproducible);
-    public void ConfirmFix() => _machine.Fire(BugTrigger.ConfirmFix);
-    public void RejectFix() => _machine.Fire(BugTrigger.RejectFix);
-    public void Close() => _machine.Fire(BugTrigger.Close);
-    public void Reopen() => _machine.Fire(BugTrigger.Reopen);
-    
-    public void AssignToTester(string person)
+    private void ConfigureNewState()
     {
-        _assignedTo = person;
-        _machine.Fire(_assignToTesterParam, person);
-        Console.WriteLine($"Баг назначен тестировщику: {person}");
+        _workflow.Configure(State.New)
+            .Permit(Trigger.Triage, State.Triaged);
     }
-    
-    public void AssignToProductTeam(string person)
+
+    private void ConfigureTriagedState()
     {
-        _assignedTo = person;
-        _machine.Fire(_assignToProductTeamParam, person);
-        Console.WriteLine($"Баг назначен продуктовой команде: {person}");
+        _workflow.Configure(State.Triaged)
+            .Permit(Trigger.StartProgress, State.InProgress)
+            .Permit(Trigger.RequestInfo, State.WaitingForInfo)
+            .Permit(Trigger.Defer, State.Deferred)
+            .Permit(Trigger.MarkNotABug, State.Rejected)
+            .Permit(Trigger.MarkDuplicate, State.Duplicate)
+            .Permit(Trigger.MarkCannotReproduce, State.CannotReproduce);
     }
-    
-    public void AssignToDeveloper(string person)
+
+    private void ConfigureInProgressState()
     {
-        _assignedTo = person;
-        _machine.Fire(_assignToDeveloperParam, person);
-        Console.WriteLine($"Баг назначен разработчику: {person}");
+        _workflow.Configure(State.InProgress)
+            .Permit(Trigger.RequestInfo, State.WaitingForInfo)
+            .Permit(Trigger.Defer, State.Deferred)
+            .Permit(Trigger.Resolve, State.Resolved);
     }
-    
-    public bool CanAssignToTester() => _machine.CanFire(BugTrigger.AssignToTester);
-    public bool CanAssignToDeveloper() => _machine.CanFire(BugTrigger.AssignToDeveloper);
+
+    private void ConfigureWaitingForInfoState()
+    {
+        _workflow.Configure(State.WaitingForInfo)
+            .Permit(Trigger.ProvideInfo, State.Triaged)
+            .Permit(Trigger.StartProgress, State.InProgress);
+    }
+
+    private void ConfigureDeferredState()
+    {
+        _workflow.Configure(State.Deferred)
+            .Permit(Trigger.Resume, State.Triaged);
+    }
+
+    private void ConfigureResolvedState()
+    {
+        _workflow.Configure(State.Resolved)
+            .PermitIf(_verifyFixTrigger, State.Closed, isFixed => isFixed)
+            .PermitIf(_verifyFixTrigger, State.Reopened, isFixed => !isFixed)
+            .Permit(Trigger.Reopen, State.Reopened);
+    }
+
+    private void ConfigureReviewStates()
+    {
+        _workflow.Configure(State.CannotReproduce)
+            .Permit(Trigger.Close, State.Closed)
+            .Permit(Trigger.Reopen, State.Reopened);
+
+        _workflow.Configure(State.Rejected)
+            .Permit(Trigger.Reopen, State.Reopened);
+
+        _workflow.Configure(State.Duplicate)
+            .Permit(Trigger.Reopen, State.Reopened);
+
+        _workflow.Configure(State.Closed)
+            .Permit(Trigger.Reopen, State.Reopened);
+    }
+
+    private void ConfigureReopenedState()
+    {
+        _workflow.Configure(State.Reopened)
+            .Permit(Trigger.ReturnToTriaged, State.Triaged)
+            .Permit(Trigger.StartProgress, State.InProgress);
+    }
+
+    private static string FormatTransition(StateMachine<State, Trigger>.Transition transition) =>
+        $"{transition.Source} --{transition.Trigger}--> {transition.Destination}";
+
+    private void Fire(Trigger trigger) => _workflow.Fire(trigger);
 }
 
-class Program
+public static class Program
 {
-    static void Main()
+    public static void Main()
     {
-        Console.WriteLine("=== Демонстрация WorkFlow бага ===\n");
-        
         var bug = new Bug();
-        
-        Console.WriteLine($"Текущее состояние: {bug.State}\n");
-        
-        // Полный цикл жизни бага
-        bug.StartAnalysis();
-        Console.WriteLine($"-> Состояние: {bug.State}\n");
-        
-        bug.ConfirmAsDefect();
-        Console.WriteLine($"-> Состояние: {bug.State}\n");
-        
-        bug.AssignToDeveloper("Иван Иванов");
-        bug.ConfirmFix();
-        Console.WriteLine($"-> Состояние: {bug.State}\n");
-        
-        bug.Close();
-        Console.WriteLine($"-> Состояние: {bug.State}\n");
-        
-        Console.WriteLine("\n=== Демонстрация отклонения исправления ===");
-        var bug2 = new Bug();
-        bug2.StartAnalysis();
-        bug2.ConfirmAsDefect();
-        bug2.RejectFix(); // Исправление отклонено
-        Console.WriteLine($"-> Состояние: {bug2.State} (возврат к анализу)\n");
-        
-        Console.WriteLine("\n=== Демонстрация переоткрытия ===");
-        var bug3 = new Bug();
-        bug3.StartAnalysis();
-        bug3.ConfirmAsDefect();
-        bug3.ConfirmFix();
-        bug3.Reopen(); // Баг переоткрыт
-        Console.WriteLine($"-> Состояние: {bug3.State}\n");
-        
-        Console.WriteLine("\nНажмите любую клавишу для выхода...");
-        Console.ReadKey();
+
+        Console.WriteLine("Bug workflow demo");
+        Console.WriteLine(bug);
+        bug.Triage();
+        bug.StartProgress();
+        bug.Resolve();
+        bug.VerifyFix(false);
+        bug.ReturnToTriaged();
+        Console.WriteLine(bug);
+        foreach (var item in bug.History)
+        {
+            Console.WriteLine(item);
+        }
     }
 }
